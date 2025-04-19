@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web 3D 비행 시뮬레이션</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; }
+        canvas { display: block; cursor: none; }
+        #uiContainer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #instructions, #scoreDisplay, #boostIndicator, #speedIndicator {
+            color: white;
+            background-color: rgba(0,0,0,0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 16px;
+            text-align: left;
+            margin-bottom: 5px;
+        }
+         #leftUI { display: flex; flex-direction: column; align-items: flex-start; }
+         #rightUI { display: flex; flex-direction: column; align-items: flex-end; }
+        #scoreDisplay { font-size: 18px; font-weight: bold; order: 1; }
+        #boostIndicator { font-size: 16px; font-weight: bold; color: #87CEFA; order: 2; }
+        #speedIndicator { font-size: 16px; font-weight: bold; color: #FFFFFF; order: 3; }
+        #gameOverMessage {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            background-color: rgba(0,0,0,0.8);
+            padding: 30px 40px;
+            border-radius: 10px;
+            font-family: sans-serif;
+            font-size: 24px;
+            text-align: center;
+            display: none;
+            cursor: pointer;
+            z-index: 11;
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="uiContainer">
+        <div id="leftUI">
+             <div id="instructions">
+                WASD: 기수 상하/좌우 선회<br>
+                QE: 좌우 기울임 (롤)<br>
+                마우스 휠: 속도 조절 (최대 300)<br>
+                파란 구슬: 부스트 연료 획득<br> Shift (연료 보유 시): 부스트 (최대 400)<br> ESC: (기능 없음 - 브라우저 기본 동작)
+            </div>
+        </div>
+         <div id="rightUI">
+             <div id="scoreDisplay">점수: 0</div>
+             <div id="boostIndicator">부스트 연료: 0.0초</div> <div id="speedIndicator">속도: 0</div>
+         </div>
+    </div>
+    <div id="gameOverMessage">
+        충돌!<br>다시 시작하려면 클릭하세요.
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 기본 설정 ---
+        let score = 0;
+        let isGameOver = false;
+        let boostFuel = 0;
+        const boostFuelPerItem = 5000;
+        const maxBoostFuel = 10000;
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.Fog(0x87CEEB, 150, 600);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x87CEEB);
+        document.body.appendChild(renderer.domElement);
+
+        // --- 조명 ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        directionalLight.position.set(10, 15, 10);
+        scene.add(directionalLight);
+
+        // --- 비행기 모델 ---
+        const planeGroup = new THREE.Group();
+        scene.add(planeGroup);
+        // ... (비행기 모델 생성 코드는 동일)
+        const bodyGeometry = new THREE.BoxGeometry(0.5, 0.5, 2);
+        const bodyMaterial = new THREE.MeshPhongMaterial({ color: 0x0000FF });
+        const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        planeGroup.add(bodyMesh);
+        const wingGeometry = new THREE.BoxGeometry(3, 0.1, 0.5);
+        const wingMaterial = new THREE.MeshPhongMaterial({ color: 0xAAAAFF });
+        const wingMesh = new THREE.Mesh(wingGeometry, wingMaterial);
+        planeGroup.add(wingMesh);
+        const tailGeometry = new THREE.BoxGeometry(0.2, 0.7, 0.3);
+        const tailMesh = new THREE.Mesh(tailGeometry, bodyMaterial);
+        tailMesh.position.set(0, 0.3, 1);
+        planeGroup.add(tailMesh);
+        const planeBox = new THREE.Box3();
+        const planeApproxRadius = 1.5;
+
+        // --- 지면 ---
+        const groundLevel = -10;
+        const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
+        const groundMaterial = new THREE.MeshPhongMaterial({ color: 0x228B22, side: THREE.DoubleSide });
+        const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.position.y = groundLevel;
+        scene.add(groundMesh);
+
+        // --- 맵 경계 설정 ---
+        const mapBoundaryX = 500;
+        const mapBoundaryZ = 500;
+        const mapBoundaryY = 150;
+
+        // --- 배경 요소 ---
+        // 강 (River)
+        const riverGeometry = new THREE.PlaneGeometry(50, 800);
+        const riverMaterial = new THREE.MeshPhongMaterial({ color: 0x1E90FF, side: THREE.DoubleSide });
+        const riverMesh = new THREE.Mesh(riverGeometry, riverMaterial);
+        riverMesh.rotation.x = -Math.PI / 2;
+        riverMesh.position.set(100, groundLevel + 0.1, 0);
+        scene.add(riverMesh);
+
+        // 건물 (Buildings)
+        const buildingGroup = new THREE.Group();
+        scene.add(buildingGroup);
+        const buildingBoxes = [];
+        const buildingCount = 50;
+        const buildingArea = 400;
+        for (let i = 0; i < buildingCount; i++) {
+            // ... (건물 생성 로직 동일)
+             const width = Math.random() * 15 + 5;
+            const depth = Math.random() * 15 + 5;
+            const height = Math.random() * 40 + 10;
+            const buildingGeometry = new THREE.BoxGeometry(width, height, depth);
+            const grayTone = Math.random() * 0.3 + 0.4;
+            const buildingColor = new THREE.Color(grayTone, grayTone, grayTone);
+            const mat = new THREE.MeshPhongMaterial({ color: buildingColor });
+            const buildingMesh = new THREE.Mesh(buildingGeometry, mat);
+            const posX = (Math.random() - 0.5) * buildingArea * 2;
+            const posZ = (Math.random() - 0.5) * buildingArea * 2;
+            if (posX > riverMesh.position.x - 30 && posX < riverMesh.position.x + 30) {
+                 buildingMesh.position.x = posX > riverMesh.position.x ? posX + 30 : posX - 30;
+            } else {
+                buildingMesh.position.x = posX;
+            }
+            buildingMesh.position.z = posZ;
+            buildingMesh.position.y = groundLevel + height / 2;
+            buildingGroup.add(buildingMesh);
+            const buildingBox = new THREE.Box3().setFromObject(buildingMesh);
+            buildingBoxes.push(buildingBox);
+        }
+
+        // 하늘 장애물 (Sky Obstacles) - 점진적 생성
+        const skyObstacleGroup = new THREE.Group();
+        scene.add(skyObstacleGroup);
+        const initialObstacleCount = 5;
+        const maxObstacleCount = 50;
+        const obstacleSpawnInterval = 5000;
+        let lastObstacleSpawnTime = 0;
+        const skyObstacleArea = 500;
+        const skyObstacleMinHeight = 5;
+        const skyObstacleMaxHeight = 50;
+        const obstacleRadius = 3;
+        const obstacleGeometry = new THREE.SphereGeometry(obstacleRadius, 16, 16);
+        const obstacleMaterial = new THREE.MeshPhongMaterial({ color: 0xFF0000 });
+        const obstacleSpeed = 25.0;
+        const obstacleCollisionDistanceSq = Math.pow(planeApproxRadius + obstacleRadius, 2);
+
+        function spawnObstacle() {
+            // ... (장애물 생성 함수 동일)
+            const obstacleMesh = new THREE.Mesh(obstacleGeometry, obstacleMaterial);
+            const posX = (Math.random() - 0.5) * skyObstacleArea * 2;
+            const posY = Math.random() * (skyObstacleMaxHeight - skyObstacleMinHeight) + skyObstacleMinHeight;
+            const posZ = (Math.random() - 0.5) * skyObstacleArea * 2;
+            obstacleMesh.position.set(posX, posY, posZ);
+            skyObstacleGroup.add(obstacleMesh);
+        }
+        for (let i = 0; i < initialObstacleCount; i++) { spawnObstacle(); }
+
+        // 코인 (Coins)
+        const coinGroup = new THREE.Group();
+        scene.add(coinGroup);
+        const coinCount = 50;
+        const coinArea = 450;
+        const coinMinHeight = 0;
+        const coinMaxHeight = 60;
+        const coinRadius = 1;
+        const coinGeometry = new THREE.CylinderGeometry(coinRadius, coinRadius, 0.2, 24);
+        const coinMaterial = new THREE.MeshBasicMaterial({ color: 0xFFFF00 });
+        const coinCollisionDistanceSq = Math.pow(planeApproxRadius + coinRadius, 2);
+
+        for (let i = 0; i < coinCount; i++) {
+             // ... (코인 생성 로직 동일)
+             const coinMesh = new THREE.Mesh(coinGeometry, coinMaterial);
+            const posX = (Math.random() - 0.5) * coinArea * 2;
+            const posY = Math.random() * (coinMaxHeight - coinMinHeight) + coinMinHeight;
+            const posZ = (Math.random() - 0.5) * coinArea * 2;
+            coinMesh.position.set(posX, posY, posZ);
+            coinMesh.rotation.x = Math.PI / 2;
+            coinGroup.add(coinMesh);
+        }
+
+        // 부스트 아이템 (Boost Items)
+        const boostItemGroup = new THREE.Group();
+        scene.add(boostItemGroup);
+        const boostItemCount = 15;
+        const boostItemArea = 500;
+        const boostItemMinHeight = 5;
+        const boostItemMaxHeight = 55;
+        const boostItemRadius = 1.5;
+        const boostItemGeometry = new THREE.SphereGeometry(boostItemRadius, 16, 16);
+        const boostItemMaterial = new THREE.MeshBasicMaterial({ color: 0x00AAFF });
+        const boostItemCollisionDistanceSq = Math.pow(planeApproxRadius + boostItemRadius, 2);
+
+        for (let i = 0; i < boostItemCount; i++) {
+             // ... (부스트 아이템 생성 로직 동일)
+            const boostItemMesh = new THREE.Mesh(boostItemGeometry, boostItemMaterial);
+            const posX = (Math.random() - 0.5) * boostItemArea * 2;
+            const posY = Math.random() * (boostItemMaxHeight - boostItemMinHeight) + boostItemMinHeight;
+            const posZ = (Math.random() - 0.5) * boostItemArea * 2;
+            boostItemMesh.position.set(posX, posY, posZ);
+            boostItemGroup.add(boostItemMesh);
+        }
+
+
+        // --- 게임 파라미터 ---
+        let currentSpeed = 0;
+        const minimumBaseSpeed = 3.0;
+        const maxSpeed = 30.0;
+        const boostedMaxInternalSpeed = 40.0;
+        const speedControlSensitivity = 0.01;
+        const boostMultiplier = 2.0;
+        const drag = 0.005;
+        const pitchRate = Math.PI / 4;
+        const yawRate = Math.PI / 4;
+        const rollRate = Math.PI / 2;
+        const speedDisplayMultiplier = 10;
+
+        // --- 입력 상태 ---
+        const keys = {};
+        document.addEventListener('keydown', (event) => { keys[event.code] = true; });
+        document.addEventListener('keyup', (event) => { keys[event.code] = false; });
+
+        // --- 마우스 휠 이벤트 리스너 (속도 조절용) ---
+        document.addEventListener('wheel', (event) => {
+            if (isGameOver) return;
+            const speedChange = -event.deltaY * speedControlSensitivity;
+            currentSpeed += speedChange;
+            currentSpeed = Math.max(minimumBaseSpeed, Math.min(currentSpeed, maxSpeed));
+        });
+
+        // --- 마우스 포인터 잠금 로직 (커서 숨기기용) ---
+        let isPointerLocked = false;
+        document.addEventListener('pointerlockchange', () => {
+            isPointerLocked = document.pointerLockElement === document.body;
+        });
+        document.body.addEventListener('click', () => {
+            if (isGameOver) {
+                location.reload();
+            } else if (!isPointerLocked) {
+                 document.body.requestPointerLock();
+            }
+        });
+
+        // --- 고정 카메라 설정 ---
+        const cameraOffset = new THREE.Vector3(0, 2.0, 6.0);
+
+        // --- UI 및 충돌 처리 ---
+        const scoreDisplayDiv = document.getElementById('scoreDisplay');
+        const boostIndicatorDiv = document.getElementById('boostIndicator');
+        const speedIndicatorDiv = document.getElementById('speedIndicator');
+        const gameOverMessageDiv = document.getElementById('gameOverMessage');
+        const instructionsDiv = document.getElementById('instructions');
+
+        function updateScore(newScore) { /* ... (동일) ... */
+             score = newScore;
+            scoreDisplayDiv.textContent = `점수: ${score}`;
+        }
+
+        function updateBoostIndicator() { /* ... (동일) ... */
+            const remainingSeconds = (boostFuel / 1000).toFixed(1);
+            boostIndicatorDiv.textContent = `부스트 연료: ${remainingSeconds}초`;
+            if (boostFuel > 0) {
+                 boostIndicatorDiv.style.color = '#00FFFF';
+            } else {
+                 boostIndicatorDiv.style.color = '#87CEFA';
+            }
+        }
+
+        // 속도 UI 업데이트 함수 (표시할 속도 값을 인자로 받도록 수정)
+        function updateSpeedIndicator(speedToDisplay) {
+             const displaySpeed = Math.round(speedToDisplay * speedDisplayMultiplier);
+            speedIndicatorDiv.textContent = `속도: ${displaySpeed}`;
+        }
+
+        function explodePlane(message = "충돌!") { /* ... (동일) ... */
+             if (isGameOver) return;
+            isGameOver = true;
+            planeGroup.visible = false;
+            currentSpeed = 0;
+            boostFuel = 0;
+            gameOverMessageDiv.innerHTML = `${message}<br>다시 시작하려면 클릭하세요.`;
+            gameOverMessageDiv.style.display = 'block';
+            instructionsDiv.style.display = 'none';
+            scoreDisplayDiv.style.display = 'none';
+            boostIndicatorDiv.style.display = 'none';
+            speedIndicatorDiv.style.display = 'none';
+            if (document.pointerLockElement) {
+                 document.exitPointerLock();
+            }
+            console.log("Game Over:", message);
+        }
+
+        // --- 애니메이션 루프 ---
+        const clock = new THREE.Clock();
+        const coinRotationSpeed = Math.PI;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const now = Date.now(); // 장애물 스폰 타이머용
+
+            // 코인 회전 애니메이션
+            coinGroup.children.forEach(coin => { /* ... (동일) ... */
+                 if (coin.visible) {
+                    coin.rotation.z += coinRotationSpeed * delta;
+                }
+            });
+
+             // 하늘 장애물 이동 (Homing)
+             if (!isGameOver) { /* ... (동일) ... */
+                  const planePos = planeGroup.position;
+                skyObstacleGroup.children.forEach(obstacle => {
+                    if (planeGroup.visible) {
+                        const direction = planePos.clone().sub(obstacle.position).normalize();
+                        obstacle.position.add(direction.multiplyScalar(obstacleSpeed * delta));
+                    }
+                });
+             }
+
+            // 장애물 주기적 생성
+            if (!isGameOver && now - lastObstacleSpawnTime > obstacleSpawnInterval) { /* ... (동일) ... */
+                 if (skyObstacleGroup.children.length < maxObstacleCount) {
+                    spawnObstacle();
+                    lastObstacleSpawnTime = now;
+                }
+            }
+
+            // --- 최종 이동 속도 계산 (애니메이션 루프 초반으로 이동) ---
+            let effectiveSpeed = currentSpeed; // 기본값은 currentSpeed
+            if (!isGameOver) {
+                let actualBoostMultiplier = 1;
+                const isBoosting = (keys['ShiftLeft'] || keys['ShiftRight']) && boostFuel > 0;
+
+                if (isBoosting) {
+                    actualBoostMultiplier = boostMultiplier;
+                    boostFuel -= delta * 1000;
+                    boostFuel = Math.max(0, boostFuel);
+                }
+                // 드래그 적용
+                currentSpeed = Math.max(minimumBaseSpeed, currentSpeed - drag * delta);
+                // 최종 이동 속도 계산 (부스트 적용 및 부스트 최대 속도 제한)
+                effectiveSpeed = currentSpeed * actualBoostMultiplier;
+                effectiveSpeed = Math.min(effectiveSpeed, boostedMaxInternalSpeed);
+            } else {
+                 effectiveSpeed = 0; // 게임 오버 시 속도 0
+            }
+
+
+            // UI 업데이트 (effectiveSpeed 사용)
+            updateBoostIndicator();
+            if (!isGameOver) {
+                 updateSpeedIndicator(effectiveSpeed); // effectiveSpeed를 전달하여 표시
+            }
+
+
+            if (!isGameOver) {
+                // --- 입력 처리 및 비행기 업데이트 ---
+
+                // --- 키보드 비행 조작 ---
+                // Pitch (W/S)
+                if (keys['KeyS']) { planeGroup.rotateOnAxis(new THREE.Vector3(1, 0, 0), pitchRate * delta); }
+                if (keys['KeyW']) { planeGroup.rotateOnAxis(new THREE.Vector3(1, 0, 0), -pitchRate * delta); }
+                // Yaw (A/D)
+                if (keys['KeyA']) { planeGroup.rotateOnAxis(new THREE.Vector3(0, 1, 0), yawRate * delta); }
+                if (keys['KeyD']) { planeGroup.rotateOnAxis(new THREE.Vector3(0, 1, 0), -yawRate * delta); }
+                // Roll (Q/E)
+                if (keys['KeyQ']) { planeGroup.rotateOnAxis(new THREE.Vector3(0, 0, 1), rollRate * delta); }
+                if (keys['KeyE']) { planeGroup.rotateOnAxis(new THREE.Vector3(0, 0, 1), -rollRate * delta); }
+
+                // 비행기 이동 (effectiveSpeed 사용)
+                const forward = new THREE.Vector3(0, 0, -1);
+                forward.applyQuaternion(planeGroup.quaternion);
+                planeGroup.position.add(forward.clone().multiplyScalar(effectiveSpeed * delta));
+
+                // --- 충돌 및 경계 감지 ---
+                const planeCenter = planeGroup.position;
+
+                // 0. 맵 경계 감지
+                if (planeCenter.x > mapBoundaryX || planeCenter.x < -mapBoundaryX ||
+                    planeCenter.z > mapBoundaryZ || planeCenter.z < -mapBoundaryZ ||
+                    planeCenter.y > mapBoundaryY) {
+                    explodePlane("맵 이탈!");
+                }
+                // 1. 지면 충돌
+                if (!isGameOver && planeCenter.y <= groundLevel + 0.5) { explodePlane("지면 충돌!"); }
+                // 2. 건물 충돌
+                if (!isGameOver) { /* ... (동일) ... */
+                    planeBox.setFromObject(planeGroup);
+                    for (const buildingBox of buildingBoxes) {
+                        if (planeBox.intersectsBox(buildingBox)) {
+                            explodePlane("건물 충돌!");
+                            break;
+                        }
+                    }
+                }
+                // 3. 하늘 장애물 충돌
+                if (!isGameOver) { /* ... (동일) ... */
+                     for (let i = 0; i < skyObstacleGroup.children.length; i++) {
+                        const obstacle = skyObstacleGroup.children[i];
+                        const distanceSq = planeCenter.distanceToSquared(obstacle.position);
+                        if (distanceSq < obstacleCollisionDistanceSq) {
+                            explodePlane("장애물 충돌!");
+                            break;
+                        }
+                    }
+                }
+                // 4. 코인 획득
+                if (!isGameOver) { /* ... (동일) ... */
+                     coinGroup.children.forEach(coin => {
+                        if (coin.visible) {
+                            const distanceSq = planeCenter.distanceToSquared(coin.position);
+                            if (distanceSq < coinCollisionDistanceSq) {
+                                coin.visible = false;
+                                updateScore(score + 10);
+                            }
+                        }
+                    });
+                }
+                 // 5. 부스트 아이템 획득
+                 if (!isGameOver) { /* ... (동일) ... */
+                     boostItemGroup.children.forEach(item => {
+                        if (item.visible) {
+                            const distanceSq = planeCenter.distanceToSquared(item.position);
+                            if (distanceSq < boostItemCollisionDistanceSq) {
+                                item.visible = false;
+                                boostFuel = Math.min(maxBoostFuel, boostFuel + boostFuelPerItem);
+                                console.log(`Boost item collected! Fuel: ${boostFuel}`);
+                            }
+                        }
+                    });
+                 }
+
+            } // End of if (!isGameOver)
+
+            // --- 고정 카메라 업데이트 ---
+            if (!isGameOver) {
+                 const targetCameraPosition = planeGroup.position.clone().add(
+                    cameraOffset.clone().applyQuaternion(planeGroup.quaternion)
+                 );
+                 camera.position.lerp(targetCameraPosition, delta * 5);
+                 camera.lookAt(planeGroup.position);
+            }
+
+            // --- 렌더링 ---
+            renderer.render(scene, camera);
+        }
+
+        // --- 창 크기 조절 처리 ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 초기화 ---
+        lastObstacleSpawnTime = Date.now();
+        currentSpeed = minimumBaseSpeed;
+        updateScore(0);
+        updateBoostIndicator();
+        updateSpeedIndicator(currentSpeed); // 초기 속도 표시 (effectiveSpeed 대신 currentSpeed 사용)
+        animate();
+    </script>
+</body>
+</html>
